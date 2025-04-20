@@ -2,7 +2,8 @@ import os
 import time
 import argparse
 import json
-import requests
+import httpx
+import asyncio
 import pandas as pd
 from datetime import date, datetime
 from collections import defaultdict
@@ -12,8 +13,8 @@ from typing import List, Optional
 from urllib.robotparser import RobotFileParser
 
 from lxml import html
-from playwright.sync_api import sync_playwright
-from tqdm import tqdm
+from playwright.async_api import async_playwright
+from tqdm.asyncio import tqdm
 
 from length_enum import Length, parse_enum
 
@@ -36,28 +37,28 @@ def prepare_structure() -> None:
 
 
 # Read robots.txt of a website, to check if it allows fetching
-def check_if_allowed(main_webpage: str, target: str, browser) -> bool:
-    page = browser.new_page()
-    page.goto(main_webpage + "/robots.txt")
+async def check_if_allowed(main_webpage: str, target: str, browser) -> bool:
+    page = await browser.new_page()
+    await page.goto(main_webpage + "/robots.txt")
     rp = RobotFileParser()
-    rp.parse(page.text_content("body").splitlines())
+    rp.parse((await page.text_content("body")).splitlines())
     result = rp.can_fetch("*", f"/{target}")
-    page.close()
+    await page.close()
     return result
 
 
 # Fetch top LIMIT companies on NASDAQ
-def scrap_top_companies_symbols(webpage: str, limit: int, browser) -> List[str]:
-    page = browser.new_page()
-    page.goto(webpage)
-    tree = html.fromstring(page.content())
+async def scrap_top_companies_symbols(webpage: str, limit: int, browser) -> List[str]:
+    page = await browser.new_page()
+    await page.goto(webpage)
+    tree = html.fromstring(await page.content())
     links = tree.xpath("//table[1]//tr//td[3]//a//text()")
     result = links if limit > len(links) else links[:limit]
-    page.close()
+    await page.close()
     return result
 
 
-def scrap_history_of_companies(company_symbol: List[str], download_range: Optional[Length], browser = None) -> None:
+async def scrap_history_of_companies(company_symbol: List[str], download_range: Optional[Length], browser = None) -> None:
     """Fetch historical data for certain companies from NASDAQ
 
     Args:
@@ -68,31 +69,35 @@ def scrap_history_of_companies(company_symbol: List[str], download_range: Option
     Returns:
         Pulled data is saved to the ./data directory
     """
-    context = browser.new_context(accept_downloads=True, user_agent="Non-profit student")
-    for company in tqdm(company_symbol, desc="Progress"):
-        page = context.new_page()
-        webpage = NASDAQ_REQUEST_PATH.replace("COMPANY_SYMBOL", company.lower()).replace("DOWNLOAD_RANGE", download_range)
-        page.goto(webpage)
-        try:
-            page.locator("#onetrust-accept-btn-handler").click(timeout=3000)
-        except:
-            pass
-        try:
-            page.locator("button[aria-label='Close']").first.click(timeout=2000)
-        except:
-            pass
-        # # Wait for the download button to be visible
-        page.wait_for_selector("button.historical-download", timeout=15000)
-        page.wait_for_timeout(1000)
-        with page.expect_download() as download_info:
-            page.get_by_text("Download historical data").click()
-        download = download_info.value
-        download_path = os.path.join(DATASET_DIRECTORY, f"{company}.csv")
-        download.save_as(download_path)
-        print(f"Succesfully downloaded {company} historical data to {download_path}.\nAwaiting {NASDAQ_REQUEST_DELAY} seconds for next request (not forced, but asked by owners)")
-        page.close()
-        time.sleep(NASDAQ_REQUEST_DELAY)
-    context.close()
+    try:
+        context = await browser.new_context(accept_downloads=True, user_agent="Non-profit student")
+        for company in tqdm(company_symbol, desc="Progress"):
+            try:
+                page = await context.new_page()
+                webpage = NASDAQ_REQUEST_PATH.replace("COMPANY_SYMBOL", company.lower()).replace("DOWNLOAD_RANGE", download_range)
+                await page.goto(webpage)
+                try:
+                    await page.locator("#onetrust-accept-btn-handler").click(timeout=3000)
+                except:
+                    pass
+                try:
+                    await page.locator("button[aria-label='Close']").first.click(timeout=2000)
+                except:
+                    pass
+                # Wait for the download button to be visible
+                await page.wait_for_selector("button.historical-download", timeout=15000)
+                await page.wait_for_timeout(1000)
+                async with page.expect_download() as download_info:
+                    await page.get_by_text("Download historical data").click()
+                download = await download_info.value
+                download_path = os.path.join(NASDAQ_REQUEST_PATH, f"{company}.csv")
+                await download.save_as(download_path)
+                print(f"Succesfully downloaded {company} historical data to {download_path}.\nAwaiting {NASDAQ_REQUEST_DELAY} seconds for next request (not forced, but asked by owners)")
+            finally:
+                await page.close()
+                await asyncio.sleep(NASDAQ_REQUEST_DELAY)
+    finally:
+        await context.close()
     print("Finished downloading historical data")
 
 
@@ -101,22 +106,25 @@ def save_to_json(content: dict[str, List[str]]) -> None:
         json.dump(content, file, indent=4)
 
 
-def match_company_to_sector(company_symbols: List[str], browser) -> None:
-    page = browser.new_page()
+async def match_company_to_sector(company_symbols: List[str], browser) -> None:
+    print("Begin Matching sectors to companies")
+    page = await browser.new_page()
     sectors = defaultdict(list)
     for company in company_symbols:
         webpage = "https://stockanalysis.com/stocks/COMPANY_SYMBOL/company/"
         webpage = webpage.replace("COMPANY_SYMBOL", company.lower())
-        page.goto(webpage)
-        tree = html.fromstring(page.content())
+        await page.goto(webpage)
+        tree = html.fromstring(await page.content())
         # Fetch only the sector of the company
         sector = tree.xpath("//table[1]//tr[5]//td[2]//a//text()")[0]
         sectors[sector].append(company)
-    page.close()
+    await page.close()
     save_to_json(sectors)
+    print("Finished Matching sectors to companies")
 
 
-def fetch_fear_and_greed_index(browser):
+
+async def fetch_fear_and_greed_index():
     url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
     header = {
         "User-Agent": (
@@ -125,39 +133,42 @@ def fetch_fear_and_greed_index(browser):
         "Chrome/123.0.0.0 Safari/537.36"
     ),
     }
-    data = requests.get(url, headers=header).json()["fear_and_greed_historical"]
+    print("Begin Fetching fear & greeed index")
+    async with httpx.AsyncClient(headers=header) as client:
+        data = (await client.get(url, headers=header)).json()["fear_and_greed_historical"]
     fear = pd.DataFrame(data["data"])
     fear["x"] = fear["x"].apply(lambda ordinal: date.fromtimestamp(int(ordinal) // 1000))
     fear.rename({"x": "date", "y": "fear_greed_factor"}, axis=1, inplace=True)
     fear.to_csv(os.path.join(DATASET_DIRECTORY, "fear_greed.csv"))
+    print("Finished Fetching fear & greeed index")
 
 
-def main(limit: int, range: Length):
+async def main(limit: int, range: Length):
     prepare_structure()
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
         
         # Scrape TOP limit companies from https://www.slickcharts.com/nasdaq100
-        # if (check_if_allowed("https://www.slickcharts.com", "nasdaq100", browser)):
-        #     print("Pulling top nasdaq companies")
-        #     result = scrap_top_companies_symbols("https://www.slickcharts.com/nasdaq100", limit=limit, browser=browser)
-        #     print("Finished fetching top nasdaq companies")
+        if (await check_if_allowed("https://www.slickcharts.com", "nasdaq100", browser)):
+            print("Pulling top nasdaq companies")
+            result = await scrap_top_companies_symbols("https://www.slickcharts.com/nasdaq100", limit=limit, browser=browser)
+            print("Finished fetching top nasdaq companies")
 
         # Download history for each company from previous step
-        # scrap_history_of_companies(result, range, browser)
+        hist = asyncio.create_task(scrap_history_of_companies(result, range, browser))
         
         # Fetch Sectors for each company
-        # match_company_to_sector(result, browser)
+        matching = asyncio.create_task(match_company_to_sector(result, browser))
         
         # Fetch Fear&Greed Factor
-        # fetch_fear_and_greed_index(browser)
-        browser.close()
+        fear_greed = asyncio.create_task(fetch_fear_and_greed_index())
+        await asyncio.gather(hist, matching, fear_greed)
+        await browser.close()
 
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(prog="scrapper", description="CLI for scrapping data from NASDAQ's top X companies")
-    # parser.add_argument("--limit", type=int, default=NUMBER_OF_COMPANIES, help="Amount of top companies to pull historical data on")
-    # parser.add_argument("--range", type=parse_enum(Length), default=NASDAQ_REQUEST_LENGTH, help="Time interval of historical data to pull.\nPossible options are : ONE_MONTH, SIX_MONTH, YTD, YEAR, YEAR_FIVE, MAX")
-    # args = parser.parse_args()
-    # main(args.limit, args.range)
-    main(NUMBER_OF_COMPANIES, NASDAQ_REQUEST_LENGTH)
+    parser = argparse.ArgumentParser(prog="scrapper", description="CLI for scrapping data from NASDAQ's top X companies")
+    parser.add_argument("--limit", type=int, default=NUMBER_OF_COMPANIES, help="Amount of top companies to pull historical data on")
+    parser.add_argument("--range", type=parse_enum(Length), default=NASDAQ_REQUEST_LENGTH, help="Time interval of historical data to pull.\nPossible options are : ONE_MONTH, SIX_MONTH, YTD, YEAR, YEAR_FIVE, MAX")
+    args = parser.parse_args()
+    asyncio.run(main(args.limit, args.range))
