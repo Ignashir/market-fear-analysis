@@ -1,6 +1,11 @@
 import os
 import time
 import argparse
+import json
+import requests
+import pandas as pd
+from datetime import date, datetime
+from collections import defaultdict
 from dotenv import load_dotenv
 
 from typing import List, Optional
@@ -18,14 +23,16 @@ NASDAQ_REQUEST_DELAY = int(os.getenv("NASDAQ_REQUEST_DELAY"))
 NUMBER_OF_COMPANIES = int(os.getenv("NUMBER_OF_COMPANIES"))
 NASDAQ_REQUEST_PATH = os.getenv("NASDAQ_REQUEST_PATH")
 DATASET_DIRECTORY = os.getenv("DATASET_DIRECTORY")
+NASDAQ_DOWLNOAD = os.path.join(DATASET_DIRECTORY, "nasdaq")
+
 NASDAQ_REQUEST_LENGTH = Length.ONE_MONTH
 
 
 
 # Create necessary directories
 def prepare_structure() -> None:
-    # Prepare directory for data
-    os.makedirs(os.path.join(os.getcwd(), "data"), exist_ok=True)
+    # Prepare directory for data from nasdaq
+    os.makedirs(os.path.join(os.getcwd(), NASDAQ_DOWLNOAD), exist_ok=True)
 
 
 # Read robots.txt of a website, to check if it allows fetching
@@ -50,7 +57,7 @@ def scrap_top_companies_symbols(webpage: str, limit: int, browser) -> List[str]:
     return result
 
 
-def scrap_history_of_companies(company_symbol: List[str], download_range: Optional[Length] = NASDAQ_REQUEST_LENGTH, browser = None) -> None:
+def scrap_history_of_companies(company_symbol: List[str], download_range: Optional[Length], browser = None) -> None:
     """Fetch historical data for certain companies from NASDAQ
 
     Args:
@@ -77,7 +84,6 @@ def scrap_history_of_companies(company_symbol: List[str], download_range: Option
         # # Wait for the download button to be visible
         page.wait_for_selector("button.historical-download", timeout=15000)
         page.wait_for_timeout(1000)
-        # page.click("button.historical-download")
         with page.expect_download() as download_info:
             page.get_by_text("Download historical data").click()
         download = download_info.value
@@ -90,21 +96,68 @@ def scrap_history_of_companies(company_symbol: List[str], download_range: Option
     print("Finished downloading historical data")
 
 
+def save_to_json(content: dict[str, List[str]]) -> None:
+    with open(os.path.join(DATASET_DIRECTORY, "sectors.json"), 'w') as file:
+        json.dump(content, file, indent=4)
+
+
+def match_company_to_sector(company_symbols: List[str], browser) -> None:
+    page = browser.new_page()
+    sectors = defaultdict(list)
+    for company in company_symbols:
+        webpage = "https://stockanalysis.com/stocks/COMPANY_SYMBOL/company/"
+        webpage = webpage.replace("COMPANY_SYMBOL", company.lower())
+        page.goto(webpage)
+        tree = html.fromstring(page.content())
+        # Fetch only the sector of the company
+        sector = tree.xpath("//table[1]//tr[5]//td[2]//a//text()")[0]
+        sectors[sector].append(company)
+    page.close()
+    save_to_json(sectors)
+
+
+def fetch_fear_and_greed_index(browser):
+    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    header = {
+        "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    }
+    data = requests.get(url, headers=header).json()["fear_and_greed_historical"]
+    fear = pd.DataFrame(data["data"])
+    fear["x"] = fear["x"].apply(lambda ordinal: date.fromtimestamp(int(ordinal) // 1000))
+    fear.rename({"x": "date", "y": "fear_greed_factor"}, axis=1, inplace=True)
+    fear.to_csv(os.path.join(DATASET_DIRECTORY, "fear_greed.csv"))
+
+
 def main(limit: int, range: Length):
     prepare_structure()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        if (check_if_allowed("https://www.slickcharts.com", "nasdaq100", browser)):
-            print("Pulling top nasdaq companies")
-            result = scrap_top_companies_symbols("https://www.slickcharts.com/nasdaq100", limit=limit, browser=browser)
-            print("Finished fetching top nasdaq companies")
-        scrap_history_of_companies(result, range, browser)
+        
+        # Scrape TOP limit companies from https://www.slickcharts.com/nasdaq100
+        # if (check_if_allowed("https://www.slickcharts.com", "nasdaq100", browser)):
+        #     print("Pulling top nasdaq companies")
+        #     result = scrap_top_companies_symbols("https://www.slickcharts.com/nasdaq100", limit=limit, browser=browser)
+        #     print("Finished fetching top nasdaq companies")
+
+        # Download history for each company from previous step
+        # scrap_history_of_companies(result, range, browser)
+        
+        # Fetch Sectors for each company
+        # match_company_to_sector(result, browser)
+        
+        # Fetch Fear&Greed Factor
+        # fetch_fear_and_greed_index(browser)
         browser.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="scrapper", description="CLI for scrapping data from NASDAQ's top X companies")
-    parser.add_argument("--limit", type=int, default=NUMBER_OF_COMPANIES, help="Amount of top companies to pull historical data on")
-    parser.add_argument("--range", type=parse_enum(Length), default=NASDAQ_REQUEST_LENGTH, help="Time interval of historical data to pull.\nPossible options are : ONE_MONTH, SIX_MONTH, YTD, YEAR, YEAR_FIVE, MAX")
-    args = parser.parse_args()
-    main(args.limit, args.range)
+    # parser = argparse.ArgumentParser(prog="scrapper", description="CLI for scrapping data from NASDAQ's top X companies")
+    # parser.add_argument("--limit", type=int, default=NUMBER_OF_COMPANIES, help="Amount of top companies to pull historical data on")
+    # parser.add_argument("--range", type=parse_enum(Length), default=NASDAQ_REQUEST_LENGTH, help="Time interval of historical data to pull.\nPossible options are : ONE_MONTH, SIX_MONTH, YTD, YEAR, YEAR_FIVE, MAX")
+    # args = parser.parse_args()
+    # main(args.limit, args.range)
+    main(NUMBER_OF_COMPANIES, NASDAQ_REQUEST_LENGTH)
