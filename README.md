@@ -16,4 +16,4 @@ DATASET_DIRECTORY = "data" (directory where all the files will be saved)
 cd Market_fear
 python web_scraper/scraper.py --limit={Desired amount of companies} --range={Desired Range}
 ```
-#### Keep in mind that this process WILL take some time because of the delays that NASDAQ _enforces_ on crawling, which is 30 seconds
+#### Keep in mind that this process WILL take some time because of the delays that NASDAQ _enforces_ on crawling, which is 30 seconds per request

@@ -71,7 +71,7 @@ async def scrap_history_of_companies(company_symbol: List[str], download_range: 
     """
     try:
         context = await browser.new_context(accept_downloads=True, user_agent="Non-profit student")
-        for company in tqdm(company_symbol, desc="Progress"):
+        for idx, company in enumerate(tqdm(company_symbol, desc="Progress")):
             try:
                 page = await context.new_page()
                 webpage = NASDAQ_REQUEST_PATH.replace("COMPANY_SYMBOL", company.lower()).replace("DOWNLOAD_RANGE", download_range)
@@ -90,12 +90,13 @@ async def scrap_history_of_companies(company_symbol: List[str], download_range: 
                 async with page.expect_download() as download_info:
                     await page.get_by_text("Download historical data").click()
                 download = await download_info.value
-                download_path = os.path.join(NASDAQ_REQUEST_PATH, f"{company}.csv")
+                download_path = os.path.join(NASDAQ_DOWLNOAD, f"{company}.csv")
                 await download.save_as(download_path)
                 print(f"Succesfully downloaded {company} historical data to {download_path}.\nAwaiting {NASDAQ_REQUEST_DELAY} seconds for next request (not forced, but asked by owners)")
             finally:
                 await page.close()
-                await asyncio.sleep(NASDAQ_REQUEST_DELAY)
+                if idx < len(company_symbol) - 1:
+                    await asyncio.sleep(NASDAQ_REQUEST_DELAY)
     finally:
         await context.close()
     print("Finished downloading historical data")
@@ -139,7 +140,7 @@ async def fetch_fear_and_greed_index():
     fear = pd.DataFrame(data["data"])
     fear["x"] = fear["x"].apply(lambda ordinal: date.fromtimestamp(int(ordinal) // 1000))
     fear.rename({"x": "date", "y": "fear_greed_factor"}, axis=1, inplace=True)
-    fear.to_csv(os.path.join(DATASET_DIRECTORY, "fear_greed.csv"))
+    fear.to_csv(os.path.join(DATASET_DIRECTORY, "fear_greed.csv"), index=False)
     print("Finished Fetching fear & greeed index")
 
 
